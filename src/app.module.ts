@@ -1,0 +1,37 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
+import { BullBoardModule } from '@bull-board/nestjs';
+import { ExpressAdapter } from '@bull-board/express';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { CountriesModule } from './countries/countries.module';
+import { DatabaseModule } from './database/database.module';
+import { DiscoveryModule } from './discovery/discovery.module';
+import { GmailModule } from './gmail/gmail.module';
+import { JobRunsModule } from './job-runs/job-runs.module';
+import { OutreachModule } from './outreach/outreach.module';
+import { PersonalizationModule } from './personalization/personalization.module';
+import { ProfessorsModule } from './professors/professors.module';
+import { QueueModule } from './queue/queue.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
+    // Visual BullMQ dashboard at http://localhost:5000/admin/queues
+    BullBoardModule.forRoot({ route: '/admin/queues', adapter: ExpressAdapter }),
+    DatabaseModule,
+    QueueModule,
+    JobRunsModule,
+    CountriesModule,
+    ProfessorsModule,
+    DiscoveryModule,
+    PersonalizationModule,
+    GmailModule,
+    OutreachModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
