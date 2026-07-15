@@ -2,6 +2,8 @@
 /dist
 /node_modules
 /build
+/pdf
+
 
 # Logs
 logs
@@ -49,7 +51,7 @@ lerna-debug.log*
 .temp
 .tmp
 
-/.pdf
+
 
 # Runtime data
 pids
