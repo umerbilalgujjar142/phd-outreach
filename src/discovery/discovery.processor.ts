@@ -5,11 +5,12 @@ import { JobRunsService } from '../job-runs/job-runs.service';
 import { DISCOVERY_QUEUE } from '../queue/queue.constants';
 import { DiscoveryService } from './discovery.service';
 
-/**
- * BullMQ worker for the discovery queue. Concurrency = 1 (Section 3):
- * jobs are processed sequentially.
- */
-@Processor(DISCOVERY_QUEUE, { concurrency: 1 })
+@Processor(DISCOVERY_QUEUE, {
+  concurrency: 1,
+  lockDuration: 600_000,
+  stalledInterval: 600_000,
+  maxStalledCount: 1,
+})
 export class DiscoveryProcessor extends WorkerHost {
   private readonly logger = new Logger(DiscoveryProcessor.name);
 
