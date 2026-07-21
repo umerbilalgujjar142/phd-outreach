@@ -1,12 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 import { Op } from 'sequelize';
 import { MatchingService } from '../matching/matching.service';
+import { PersonalizationService } from '../personalization/personalization.service';
+import { ProfessorStatus } from '../professors/professor-status.enum';
 import { ProfessorsService } from '../professors/professors.service';
 import { AcademicTransferScraper } from './academictransfer.scraper';
 import { DiscoverySource } from './discovery-source.interface';
 import { EuraxessScraper } from './euraxess.scraper';
 import { JobsAcScraper } from './jobsac.scraper';
+import { PlaywrightService } from './playwright.service';
 import { SeenOffer } from './seen-offer.model';
 import {
   DiscoveryRunResult,
@@ -17,7 +22,7 @@ import {
 // Emails that are clearly not a specific researcher/PI: HR/admin boxes and
 // institutional role accounts (works councils, disability reps, deans' offices…).
 const GENERIC_EMAIL =
-  /^(hr|hrservices|jobs?|recruit\w*|info|admin\w*|office|career\w*|vacature|vacancy|application|apply|contact|secretariat|sekretariat|personnel|personal|noreply|no-reply|betriebsrat|behinderten\w*|works?council|dekanat|studien\w*|studierende|verwaltung|webmaster|support|helpdesk|it-\w*)([._-]|@)/i;
+  /^(hr|hrservices|jobs?|recruit\w*|info\w*|information|admin\w*|admission\w*|enquir\w*|inquir\w*|general|reception|office|career\w*|vacature|vacancy|application|apply|contact|secretariat|sekretariat|personnel|personal|noreply|no-reply|betriebsrat|behinderten\w*|works?council|dekanat|gradschool\w*|graduate|postgrad\w*|studien\w*|studierende|studies|verwaltung|webmaster|support|helpdesk|it-\w*)([._-]|@)/i;
 
 // Role tokens that disqualify an email regardless of position in the local-part.
 const ROLE_TOKEN = /(^|[._-])(br\d|works?council|betriebsrat|behinderten|dekanat)([._-]|@|$)/i;
@@ -48,6 +53,8 @@ export class DiscoveryService {
     private readonly jobsAc: JobsAcScraper,
     private readonly matching: MatchingService,
     private readonly professors: ProfessorsService,
+    private readonly playwright: PlaywrightService,
+    private readonly personalization: PersonalizationService,
     @InjectModel(SeenOffer) private readonly seenOffers: typeof SeenOffer,
   ) {
     // Position-centric job-board sources. (A Playwright university faculty
@@ -160,8 +167,21 @@ export class DiscoveryService {
 
     // Prefer a named PI contact; only then fall back to a bare picked email.
     const contact = this.pickContact(listing);
-    const email = contact?.email ?? this.pickContactEmail(listing.emails);
-    const professorName = contact?.name ?? this.deriveName(listing, email);
+    let email = contact?.email ?? this.pickContactEmail(listing.emails);
+    let recoveredName: string | undefined = contact?.name;
+
+    // No email on the listing itself — it only offers an external "apply now"
+    // link. Institution ATS/job pages frequently show a supervisor email even
+    // when the board summary didn't, so follow it once before giving up: this
+    // is the only way these ever become auto-emailable instead of sitting in
+    // not_contacted forever waiting for a manual application.
+    if (!email && listing.applyUrl) {
+      const found = await this.extractContactFromApplyUrl(listing.applyUrl);
+      email = found.email;
+      recoveredName = recoveredName ?? found.name;
+    }
+
+    const professorName = recoveredName ?? this.deriveName(listing, email);
     const socialLinks = listing.applyUrl ? { apply: listing.applyUrl } : undefined;
 
     const { created } = await this.professors.upsert({
@@ -262,6 +282,183 @@ export class DiscoveryService {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * Follow an external "apply now" link once to recover the supervisor's
+   * contact (name + email) that the source listing didn't expose. Most
+   * institution ATS/job pages are plain HTML (axios+cheerio is enough); a few
+   * only render via JS, so a Playwright fallback covers those. When the page
+   * exposes candidate emails, Claude picks the academic supervisor's — NOT a
+   * generic HR/admissions/info box — and its name. Best-effort: any failure
+   * leaves the professor email-less (filed for the form-apply path instead).
+   */
+  async extractContactFromApplyUrl(
+    url: string,
+  ): Promise<{ email?: string; name?: string }> {
+    const harvest = (html: string): { emails: string[]; text: string } => {
+      const $ = cheerio.load(html);
+      $('script, style, noscript').remove();
+      const mailto = $('a[href^="mailto:"]')
+        .map((_, el) =>
+          ($(el).attr('href') || '').replace(/^mailto:/i, '').split('?')[0].trim().toLowerCase(),
+        )
+        .get()
+        .filter(Boolean);
+      const scraped = (html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [])
+        .map((e) => e.toLowerCase())
+        .filter((e) => !/sentry|example|w3\.org|\.png|\.jpg|\.gif|\.svg|@\dx|@media/.test(e));
+      const emails = [...new Set([...mailto, ...scraped])];
+      const text = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 6000);
+      return { emails, text };
+    };
+
+    let harvested: { emails: string[]; text: string } | undefined;
+    try {
+      const { data } = await axios.get<string>(url, {
+        timeout: 15_000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; phd-outreach/1.0; academic PhD search)',
+        },
+        maxRedirects: 5,
+      });
+      harvested = harvest(data);
+    } catch (err) {
+      this.logger.warn(`applyUrl fetch (axios) failed for ${url}: ${(err as Error).message}`);
+    }
+    if (!harvested?.emails.length) {
+      try {
+        harvested = await this.playwright.withPage(url, async (page) =>
+          harvest(await page.content()),
+        );
+      } catch (err) {
+        this.logger.warn(`applyUrl fetch (playwright) failed for ${url}: ${(err as Error).message}`);
+      }
+    }
+    if (!harvested?.emails.length) return {};
+
+    return this.selectSupervisorContact(harvested.emails, harvested.text);
+  }
+
+  /**
+   * Given candidate emails + surrounding page text, identify the academic
+   * supervisor/PI to write to. Asks Claude to reject generic HR/admissions/info
+   * boxes; falls back to the local heuristic if Claude is unavailable or unsure.
+   */
+  private async selectSupervisorContact(
+    emails: string[],
+    text: string,
+  ): Promise<{ email?: string; name?: string }> {
+    const prompt = `
+From an academic job/apply page, pick the SUPERVISOR / principal investigator to
+email. Choose the personal academic contact — NEVER a generic box (HR, admissions,
+info, recruitment, "apply", secretariat, no-reply). If NO personal academic email
+is present, return null for both fields.
+
+Candidate emails: ${emails.join(', ')}
+
+Page text (truncated):
+${text}
+
+Output ONLY JSON wrapped exactly between <contact> and </contact>, e.g.
+<contact>{"name":"Jane Doe","email":"jane.doe@uni.edu"}</contact>
+or <contact>{"name":null,"email":null}</contact>. Nothing outside the tags.`.trim();
+
+    const isGeneric = (e: string) => GENERIC_EMAIL.test(e) || ROLE_TOKEN.test(e);
+    try {
+      const raw = await this.personalization.completeRaw(prompt);
+      const m = raw.match(/<contact>([\s\S]*?)<\/contact>/i);
+      const json = m ? m[1] : raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
+      const parsed = JSON.parse(json) as { name?: string | null; email?: string | null };
+      const email = parsed.email?.trim().toLowerCase();
+      // Trust Claude only if it returned one of the actual candidates AND it's
+      // not a generic box (final gate — never auto-email an info/HR/admissions
+      // address; those go to the form-apply path instead).
+      if (email && emails.includes(email) && !isGeneric(email)) {
+        return { email, name: parsed.name?.trim() || undefined };
+      }
+    } catch (err) {
+      this.logger.warn(`Supervisor extraction (claude) failed: ${(err as Error).message}`);
+    }
+    // Heuristic fallback: a personal-looking, non-generic address (or nothing).
+    const fallback = this.pickContactEmail(emails);
+    return fallback && !isGeneric(fallback) ? { email: fallback } : {};
+  }
+
+  /**
+   * Backfill: for every no-email professor that still has an application link,
+   * follow it and try to recover a supervisor email (Tier 1 of the apply flow).
+   * Recovered rows get their email + name saved, which drops them straight into
+   * the normal personalize→email pipeline. Rows where no email is found are
+   * reported as needing the form-apply path (Tier 2). Read-only by default;
+   * pass { apply: true } to persist the recovered contacts.
+   */
+  async recoverEmailsFromApplyLinks(opts: { apply?: boolean; delayMs?: number } = {}): Promise<{
+    scanned: number;
+    recovered: number;
+    needsForm: number;
+    rows: {
+      id: string;
+      university: string;
+      applyUrl: string;
+      recoveredEmail?: string;
+      recoveredName?: string;
+      outcome: 'recovered' | 'needs_form';
+    }[];
+  }> {
+    const delayMs = opts.delayMs ?? 800;
+    const all = await this.professors.findAll({ status: ProfessorStatus.NOT_CONTACTED });
+    const targets = all.filter(
+      (p) => !p.email && (p.socialLinks?.apply || p.sourceUrl),
+    );
+
+    const rows: {
+      id: string;
+      university: string;
+      applyUrl: string;
+      recoveredEmail?: string;
+      recoveredName?: string;
+      outcome: 'recovered' | 'needs_form';
+    }[] = [];
+    let recovered = 0;
+
+    for (const p of targets) {
+      const applyUrl = p.socialLinks?.apply || p.sourceUrl;
+      const found = await this.extractContactFromApplyUrl(applyUrl);
+      await this.sleep(delayMs);
+      if (found.email) {
+        recovered++;
+        if (opts.apply) {
+          const patch: Record<string, string> = { email: found.email };
+          // Only upgrade a placeholder "Contact — <org>" name, never clobber a real one.
+          if (found.name && /^contact\b/i.test(p.professorName)) {
+            patch.professorName = found.name;
+          }
+          await this.professors.update(p.id, patch);
+        }
+        rows.push({
+          id: p.id,
+          university: p.university,
+          applyUrl,
+          recoveredEmail: found.email,
+          recoveredName: found.name,
+          outcome: 'recovered',
+        });
+      } else {
+        rows.push({ id: p.id, university: p.university, applyUrl, outcome: 'needs_form' });
+      }
+    }
+
+    this.logger.log(
+      `Email recovery: scanned=${targets.length} recovered=${recovered} ` +
+        `needsForm=${targets.length - recovered} (apply=${!!opts.apply})`,
+    );
+    return {
+      scanned: targets.length,
+      recovered,
+      needsForm: targets.length - recovered,
+      rows,
+    };
   }
 
   /**

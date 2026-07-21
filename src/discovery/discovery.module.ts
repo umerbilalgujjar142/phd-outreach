@@ -5,6 +5,7 @@ import { BullBoardModule } from '@bull-board/nestjs';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { JobRunsModule } from '../job-runs/job-runs.module';
 import { MatchingModule } from '../matching/matching.module';
+import { PersonalizationModule } from '../personalization/personalization.module';
 import { ProfessorsModule } from '../professors/professors.module';
 import { DISCOVERY_QUEUE } from '../queue/queue.constants';
 import { SeenOffer } from './seen-offer.model';
@@ -25,6 +26,7 @@ import { PlaywrightService } from './playwright.service';
     ProfessorsModule,
     MatchingModule,
     JobRunsModule,
+    PersonalizationModule,
   ],
   controllers: [DiscoveryController],
   providers: [
@@ -36,6 +38,6 @@ import { PlaywrightService } from './playwright.service';
     DiscoveryProcessor,
     DiscoveryScheduler,
   ],
-  exports: [DiscoveryService],
+  exports: [DiscoveryService, PlaywrightService],
 })
 export class DiscoveryModule {}

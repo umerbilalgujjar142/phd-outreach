@@ -146,6 +146,22 @@ export class ProfessorsService {
     return professor;
   }
 
+  /**
+   * Mark that a form-based application was submitted (assisted-apply flow).
+   * These listings have no email, so they never enter the email pipeline;
+   * APPLIED records them as done and appends an audit note.
+   */
+  async markApplied(id: string, note: string): Promise<Professor> {
+    const professor = await this.findOne(id);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const prior = professor.replyNotes ? `${professor.replyNotes}\n` : '';
+    await professor.update({
+      status: ProfessorStatus.APPLIED,
+      replyNotes: `${prior}[${stamp}] ${note}`,
+    });
+    return professor;
+  }
+
   /** Mark replied (Step 8): stop follow-ups; note when. */
   async markReplied(id: string): Promise<Professor> {
     const professor = await this.findOne(id);

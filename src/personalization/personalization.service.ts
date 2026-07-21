@@ -73,6 +73,15 @@ export class PersonalizationService {
   }
 
   /**
+   * Run a prompt through `claude -p` and return the cleaned raw output WITHOUT
+   * <snippet> extraction — for callers that need structured output (e.g. the
+   * apply form-planner parsing JSON). Only mojibake repair + trim is applied.
+   */
+  async completeRaw(prompt: string): Promise<string> {
+    return this.repairMojibake((await this.callClaude(prompt)).trim());
+  }
+
+  /**
    * Generate a snippet for a professor object WITHOUT persisting it. Used by the
    * self-test so the verification email exercises the real (fixed) prompt rather
    * than a canned string.

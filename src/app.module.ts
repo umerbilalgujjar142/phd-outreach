@@ -5,6 +5,7 @@ import { BullBoardModule } from '@bull-board/nestjs';
 import { ExpressAdapter } from '@bull-board/express';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { ApplyModule } from './apply/apply.module';
 import { CountriesModule } from './countries/countries.module';
 import { DatabaseModule } from './database/database.module';
 import { DiscoveryModule } from './discovery/discovery.module';
@@ -30,6 +31,7 @@ import { QueueModule } from './queue/queue.module';
     PersonalizationModule,
     GmailModule,
     OutreachModule,
+    ApplyModule,
   ],
   controllers: [AppController],
   providers: [AppService],

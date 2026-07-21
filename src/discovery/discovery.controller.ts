@@ -37,6 +37,18 @@ export class DiscoveryController {
     return this.discovery.revalidateStored({ deleteOffTopic: body?.delete });
   }
 
+  /**
+   * Tier 1 of the apply flow: follow every no-email professor's application
+   * link and try to recover a supervisor email. Dry-run by default; pass
+   * { "apply": true } to save recovered emails (they then enter the normal
+   * personalize→email pipeline). Rows with no recoverable email are reported
+   * as needing the form-apply path (Tier 2).
+   */
+  @Post('recover-emails')
+  recoverEmails(@Body() body: { apply?: boolean } = {}) {
+    return this.discovery.recoverEmailsFromApplyLinks({ apply: body?.apply });
+  }
+
   /** Last run info for the discovery job. */
   @Get('status')
   async status() {
