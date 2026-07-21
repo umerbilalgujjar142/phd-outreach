@@ -1,7 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync } from 'fs';
+import { readdir, stat, unlink } from 'fs/promises';
 import { join, resolve } from 'path';
 import type { BrowserContext, Page } from 'playwright';
 import { PlaywrightService } from '../discovery/playwright.service';
@@ -39,7 +41,7 @@ interface ApplySession {
  * (CAPTCHA, account-creation walls) are reported instead of attempted.
  */
 @Injectable()
-export class ApplyService {
+export class ApplyService implements OnModuleInit {
   private readonly logger = new Logger(ApplyService.name);
   private readonly sessions = new Map<string, ApplySession>();
   private readonly docsDir: string;
@@ -47,6 +49,7 @@ export class ApplyService {
   private readonly headful: boolean;
   private readonly sessionTtlMs: number;
   private readonly applicantEmail: string;
+  private readonly screenshotTtlDays: number;
 
   constructor(
     private readonly professors: ProfessorsService,
@@ -63,7 +66,45 @@ export class ApplyService {
       this.config.get<string>('APPLICANT_EMAIL') ??
       this.config.get<string>('GMAIL_SENDER') ??
       '';
+    this.screenshotTtlDays = Number(this.config.get('APPLY_SCREENSHOT_TTL_DAYS') ?? 2);
     if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
+  }
+
+  /** Prune leftover screenshots on boot (covers a laptop asleep at 3am). */
+  async onModuleInit(): Promise<void> {
+    await this.pruneOldScreenshots();
+  }
+
+  /**
+   * Delete review/confirmation screenshots older than APPLY_SCREENSHOT_TTL_DAYS
+   * (default 2). They're only needed while a session is being reviewed; keeping
+   * them longer just clutters ./applications. Runs daily + on boot.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  async pruneOldScreenshots(): Promise<void> {
+    const cutoff = Date.now() - this.screenshotTtlDays * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    try {
+      for (const f of await readdir(this.outDir)) {
+        if (!f.endsWith('.png')) continue;
+        const full = join(this.outDir, f);
+        try {
+          if ((await stat(full)).mtimeMs < cutoff) {
+            await unlink(full);
+            removed++;
+          }
+        } catch {
+          /* file vanished between readdir and stat — ignore */
+        }
+      }
+    } catch {
+      /* outDir missing — nothing to prune */
+    }
+    if (removed) {
+      this.logger.log(
+        `Pruned ${removed} apply screenshot(s) older than ${this.screenshotTtlDays}d`,
+      );
+    }
   }
 
   /**
@@ -230,6 +271,70 @@ export class ApplyService {
     }
     this.cleanup(sessionId);
     return { ok: true, message: `Session ${sessionId} cancelled and browser closed.` };
+  }
+
+  /**
+   * Triage every not-yet-contacted professor into an `apply_path` so the DB
+   * shows at a glance how each is reached. Read-only: opens each apply page
+   * headless, dismisses cookies, follows the apply link, and inspects the form
+   * — never logs in, fills, or submits. Professors that already have an email
+   * are labelled 'email' without any browsing.
+   */
+  async classifyAll(): Promise<{
+    total: number;
+    counts: Record<string, number>;
+    rows: { id: string; university: string; applyPath: string }[];
+  }> {
+    const professors = await this.professors.findAll({
+      status: ProfessorStatus.NOT_CONTACTED,
+    });
+    const counts: Record<string, number> = {};
+    const rows: { id: string; university: string; applyPath: string }[] = [];
+
+    for (const p of professors) {
+      let path: string;
+      if (p.email) {
+        path = 'email';
+      } else if (p.socialLinks?.apply || p.sourceUrl) {
+        path = await this.classifyOne(p.socialLinks?.apply || p.sourceUrl);
+      } else {
+        path = 'no_form';
+      }
+      await this.professors.update(p.id, { applyPath: path } as never);
+      counts[path] = (counts[path] ?? 0) + 1;
+      rows.push({ id: p.id, university: p.university, applyPath: path });
+      this.logger.log(`Classified ${p.university}: ${path}`);
+    }
+    return { total: professors.length, counts, rows };
+  }
+
+  /** Probe a single apply URL and return its path label. Always closes up. */
+  private async classifyOne(applyUrl: string): Promise<string> {
+    let context: BrowserContext | undefined;
+    try {
+      const opened = await this.playwright.openSession(applyUrl, { headful: false });
+      context = opened.context;
+      await this.dismissCookieBanner(opened.page);
+      const page = await this.navigateToForm(opened.page);
+      const hasPassword =
+        (await page.locator('input[type="password"]').count().catch(() => 0)) > 0;
+      const analysis = await this.analyzer.analyze(page);
+      const fillable = analysis.fields.filter(
+        (f) => !['checkbox', 'radio', ''].includes(f.type) || f.tag === 'textarea',
+      );
+
+      if (analysis.hardBlockers.some((b) => /captcha/i.test(b))) return 'blocked';
+      if (hasPassword || analysis.hardBlockers.some((b) => /login|account|sign/i.test(b))) {
+        return 'login_required';
+      }
+      if (fillable.length >= 2) return 'form';
+      return 'no_form';
+    } catch (err) {
+      this.logger.warn(`Classify failed for ${applyUrl}: ${(err as Error).message}`);
+      return 'no_form';
+    } finally {
+      await context?.close().catch(() => undefined);
+    }
   }
 
   /** Read-only view of a pending session (for the review UI). */

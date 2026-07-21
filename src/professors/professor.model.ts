@@ -127,6 +127,18 @@ export class Professor extends Model<Professor> {
   @Column({ type: DataType.DATE, allowNull: true, field: 'personalized_at' })
   personalizedAt: Date;
 
+  /**
+   * How this professor is (or should be) contacted, for at-a-glance triage of
+   * the no-email listings (assisted-apply feature). Set by the classifier:
+   *   'email'          — a usable email exists → normal email pipeline
+   *   'form'           — public application form, fillable + submittable
+   *   'login_required' — form is behind account creation / sign-in
+   *   'blocked'        — CAPTCHA or similar hard block
+   *   'no_form'        — apply link led to no fillable form (e.g. redirect page)
+   */
+  @Column({ type: DataType.STRING, allowNull: true, field: 'apply_path' })
+  applyPath: string;
+
   @CreatedAt
   @Column({ field: 'created_at' })
   createdAt: Date;

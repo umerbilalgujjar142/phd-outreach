@@ -24,6 +24,16 @@ import { ApplyService } from './apply.service';
 export class ApplyController {
   constructor(private readonly apply: ApplyService) {}
 
+  /**
+   * Triage all not-yet-contacted professors into an `apply_path` label
+   * (email | form | login_required | blocked | no_form) so the DB shows how
+   * each is reached. Read-only probe — no login, fill, or submit.
+   */
+  @Post('classify')
+  classify() {
+    return this.apply.classifyAll();
+  }
+
   @Post(':professorId/start')
   start(@Param('professorId') professorId: string, @Query('force') force?: string) {
     return this.apply.start(professorId, { force: /^(1|true)$/i.test(force ?? '') });
