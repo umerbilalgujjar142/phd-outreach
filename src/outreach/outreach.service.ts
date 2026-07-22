@@ -26,6 +26,29 @@ export interface SendOutcome {
 export class OutreachService {
   private readonly logger = new Logger(OutreachService.name);
   private readonly docsDir: string;
+
+  /**
+   * Per-professor in-process send lock. The double-send guards below (SELECT
+   * "already sent?" then, several seconds later, INSERT/UPDATE the sent row)
+   * are NOT atomic — a second call landing in that window (e.g. the hourly
+   * scheduler tick overlapping a manual POST /outreach/send/:id or /run) sees
+   * "not sent yet" and sends a second real email before the first call
+   * commits. Observed live: the same professor emailed twice, seconds apart,
+   * with two distinct Gmail message ids. Serializing all send/resend calls
+   * for a given professorId here closes that race regardless of which two
+   * callers overlap.
+   */
+  private readonly sendLocks = new Map<string, Promise<SendOutcome>>();
+
+  private withSendLock(professorId: string, run: () => Promise<SendOutcome>): Promise<SendOutcome> {
+    const inFlight = this.sendLocks.get(professorId);
+    if (inFlight) return inFlight;
+    const task = run().finally(() => {
+      if (this.sendLocks.get(professorId) === task) this.sendLocks.delete(professorId);
+    });
+    this.sendLocks.set(professorId, task);
+    return task;
+  }
   private readonly dailyMax: number;
   private readonly followupDays: number;
   private readonly attachMotivation: boolean;
@@ -124,7 +147,11 @@ export class OutreachService {
    * CURRENT prompt, replies in the original thread, and opens with a brief
    * correction note. Bypasses the normal double-send guard on purpose.
    */
-  async resendCorrectedInitial(professorId: string): Promise<SendOutcome> {
+  resendCorrectedInitial(professorId: string): Promise<SendOutcome> {
+    return this.withSendLock(professorId, () => this.doResendCorrectedInitial(professorId));
+  }
+
+  private async doResendCorrectedInitial(professorId: string): Promise<SendOutcome> {
     const professor = await this.professors.findOne(professorId);
     const base = { professorId, professorName: professor.professorName };
     if (!professor.email) return { ...base, ok: false, error: 'no email on record' };
@@ -209,7 +236,11 @@ export class OutreachService {
   }
 
   /** Send the initial email to one professor, logging + status update. */
-  async sendToProfessor(professorId: string): Promise<SendOutcome> {
+  sendToProfessor(professorId: string): Promise<SendOutcome> {
+    return this.withSendLock(professorId, () => this.doSendToProfessor(professorId));
+  }
+
+  private async doSendToProfessor(professorId: string): Promise<SendOutcome> {
     const professor = await this.professors.findOne(professorId);
     const base = { professorId, professorName: professor.professorName };
 
@@ -217,11 +248,29 @@ export class OutreachService {
     if (!professor.personalizedSnippet)
       return { ...base, ok: false, error: 'not personalized yet (run Step 4)' };
 
-    // Guard against double-sending an initial email.
-    const already = await this.outreachModel.findOne({
-      where: { professorId, type: OutreachType.INITIAL, status: OutreachStatus.SENT },
-    });
-    if (already) return { ...base, ok: false, error: 'initial email already sent' };
+    // Atomic cross-process guard against double-sending: flip not_contacted →
+    // emailed in a single conditional UPDATE and only proceed if WE won it.
+    // Whoever loses the race (another tick, a manual call, or a second process)
+    // gets claimed=false here and stops BEFORE sending — closing the window
+    // that let the same professor be emailed twice. On any send failure below
+    // we release the claim so it can be retried. (The per-professor in-memory
+    // lock above still short-circuits same-process overlaps early.)
+    const claimed = await this.professors.claimForInitialEmail(
+      professorId,
+      this.followupDate(),
+    );
+    if (!claimed) {
+      const already = await this.outreachModel.findOne({
+        where: { professorId, type: OutreachType.INITIAL, status: OutreachStatus.SENT },
+      });
+      return {
+        ...base,
+        ok: false,
+        error: already
+          ? 'initial email already sent'
+          : `not sendable (status is not "not_contacted")`,
+      };
+    }
 
     // Per-professor motivation letter (generated fresh, attached, then deleted).
     let letterPath: string | undefined;
@@ -267,7 +316,8 @@ export class OutreachService {
         gmailMessageId: sent.gmailMessageId,
         gmailThreadId: sent.gmailThreadId,
       });
-      await this.professors.markEmailed(professorId, this.followupDate());
+      // Status/dateEmailed/followupDate were already set by claimForInitialEmail
+      // above, so no markEmailed() call is needed here.
       this.logger.log(
         `Emailed ${professor.professorName} <${professor.email}> ` +
           `(${email.attachments.length} attachments)`,
@@ -276,6 +326,9 @@ export class OutreachService {
     } catch (err) {
       const error = (err as Error).message;
       await row.update({ status: OutreachStatus.FAILED, error });
+      // Release the claim so the professor returns to not_contacted and a later
+      // tick can retry — otherwise a failed send would leave them stuck.
+      await this.professors.releaseInitialEmailClaim(professorId);
       this.logger.warn(`Send failed for ${professor.professorName}: ${error}`);
       return { ...base, recipient: professor.email, ok: false, error };
     } finally {

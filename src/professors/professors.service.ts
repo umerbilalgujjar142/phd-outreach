@@ -147,6 +147,34 @@ export class ProfessorsService {
   }
 
   /**
+   * Atomically reserve a professor for their INITIAL email: flip
+   * not_contacted → emailed in ONE conditional UPDATE. Only the single caller
+   * that wins the flip gets `true`; any concurrent caller — even in another
+   * process — gets `false` and must not send. This is the cross-process guard
+   * against double-sending (a per-process in-memory lock can't cover multiple
+   * instances). Pair with releaseInitialEmailClaim() to undo on send failure.
+   */
+  async claimForInitialEmail(id: string, followupDate: string): Promise<boolean> {
+    const [affected] = await this.professorModel.update(
+      { status: ProfessorStatus.EMAILED, dateEmailed: new Date(), followupDate },
+      { where: { id, status: ProfessorStatus.NOT_CONTACTED } },
+    );
+    return affected > 0;
+  }
+
+  /** Undo an initial-email claim after a send failure, freeing it to retry. */
+  async releaseInitialEmailClaim(id: string): Promise<void> {
+    await this.professorModel.update(
+      {
+        status: ProfessorStatus.NOT_CONTACTED,
+        dateEmailed: null,
+        followupDate: null,
+      } as never,
+      { where: { id, status: ProfessorStatus.EMAILED } },
+    );
+  }
+
+  /**
    * Mark that a form-based application was submitted (assisted-apply flow).
    * These listings have no email, so they never enter the email pipeline;
    * APPLIED records them as done and appends an audit note.
