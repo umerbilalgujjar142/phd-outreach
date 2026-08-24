@@ -160,6 +160,74 @@ export class GmailService {
     );
   }
 
+  /**
+   * Read the most recent one-time code / verification link from the inbox — for
+   * email-verification steps during job-application logins. Read-only; scans
+   * only very recent mail (default last 15 min) matching verification language.
+   */
+  async readLatestOtp(opts?: {
+    withinMinutes?: number;
+    query?: string;
+  }): Promise<{ code?: string; link?: string; subject: string; from: string } | null> {
+    if (!this.isConnected()) throw new Error('Gmail not connected — authorize at /gmail/connect first.');
+    const gmail = google.gmail({ version: 'v1', auth: this.oauth as any });
+    const mins = Math.max(1, opts?.withinMinutes ?? 15);
+    const q =
+      opts?.query ??
+      `newer_than:${mins}m (code OR verify OR verification OR otp OR "one-time" OR confirm OR passcode OR pin)`;
+    try {
+      const list = await gmail.users.messages.list({ userId: 'me', q, maxResults: 8 });
+      for (const m of list.data.messages ?? []) {
+        if (!m.id) continue;
+        const full = await gmail.users.messages.get({ userId: 'me', id: m.id, format: 'full' });
+        const headers = full.data.payload?.headers ?? [];
+        const get = (n: string) =>
+          headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value ?? '';
+        const body = this.extractText(full.data.payload);
+        const text = `${get('Subject')}\n${body}`;
+        const code = this.findOtpCode(text);
+        const link = this.findVerifyLink(body);
+        if (code || link) {
+          return { code, link, subject: get('Subject'), from: get('From') };
+        }
+      }
+      return null;
+    } catch (err) {
+      this.logger.warn(`OTP read failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Decode the text/plain (or html→text) body from a Gmail payload tree. */
+  private extractText(payload: any): string {
+    if (!payload) return '';
+    const decode = (data?: string) =>
+      data ? Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8') : '';
+    const walk = (part: any): string => {
+      if (!part) return '';
+      if (part.mimeType === 'text/plain' && part.body?.data) return decode(part.body.data);
+      if (part.parts) return part.parts.map(walk).join('\n');
+      if (part.mimeType === 'text/html' && part.body?.data)
+        return decode(part.body.data).replace(/<[^>]+>/g, ' ');
+      return '';
+    };
+    return walk(payload).replace(/\s+/g, ' ').trim();
+  }
+
+  /** Extract a 4–8 digit one-time code, preferring one next to code/OTP wording. */
+  private findOtpCode(text: string): string | undefined {
+    const near = text.match(/(?:code|otp|passcode|pin|verification)[^\d]{0,24}(\d{4,8})/i);
+    if (near) return near[1];
+    const standalone = text.match(/\b(\d{6})\b/);
+    return standalone?.[1];
+  }
+
+  /** Extract a verification/confirmation URL from the body. */
+  private findVerifyLink(text: string): string | undefined {
+    const m = text.match(/https?:\/\/[^\s"'<>]*(verify|confirm|activate|validation|token)[^\s"'<>]*/i);
+    return m?.[0];
+  }
+
   /** RFC 822 Message-ID header of a sent message (for In-Reply-To threading). */
   async getRfcMessageId(gmailMessageId: string): Promise<string | undefined> {
     const gmail = google.gmail({ version: 'v1', auth: this.oauth as any });

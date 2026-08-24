@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { Page } from 'playwright';
+import type { Frame, Page } from 'playwright';
 import { FormAnalysis, FormField } from './apply.types';
 
 /**
@@ -15,8 +15,46 @@ export class FormAnalyzer {
   async analyze(page: Page): Promise<FormAnalysis> {
     // Give slow ATS forms a moment to render their fields.
     await page.waitForTimeout(1500);
+    return this.analyzeRoot(page);
+  }
 
-    const result = await page.evaluate(() => {
+  /**
+   * Analyze the top page AND every iframe, returning the richest form together
+   * with the root (Page or Frame) it lives in — so the caller fills in the right
+   * context. Many ATS (Recruitee/Greenhouse-embed/Ashby) render the form inside
+   * an iframe the top document can't see.
+   */
+  async analyzeBest(
+    page: Page,
+  ): Promise<{ analysis: FormAnalysis; root: Page | Frame }> {
+    await page.waitForTimeout(1800);
+    const roots: (Page | Frame)[] = [page, ...page.frames()];
+    let best: { analysis: FormAnalysis; root: Page | Frame } | null = null;
+    for (const root of roots) {
+      const analysis = await this.analyzeRoot(root).catch(() => null);
+      if (!analysis) continue;
+      if (!best || analysis.fields.length > best.analysis.fields.length) {
+        best = { analysis, root };
+      }
+    }
+    const chosen =
+      best ?? {
+        analysis: {
+          fields: [],
+          hardBlockers: ['No fillable form fields found on this page.'],
+          warnings: [],
+        } as FormAnalysis,
+        root: page as Page | Frame,
+      };
+    this.logger.log(
+      `Analyzed ${roots.length} frame(s): best form has ${chosen.analysis.fields.length} field(s)`,
+    );
+    return chosen;
+  }
+
+  /** Run the field/blocker analysis inside one root (Page or Frame). */
+  private async analyzeRoot(root: Page | Frame): Promise<FormAnalysis> {
+    const result = await root.evaluate(() => {
       const REF_ATTR = 'data-apply-ref';
 
       const visible = (el: Element): boolean => {
@@ -123,10 +161,6 @@ export class FormAnalyzer {
       return { fields, hardBlockers, warnings };
     });
 
-    this.logger.log(
-      `Analyzed form: ${result.fields.length} fields, ` +
-        `${result.hardBlockers.length} hard blocker(s)`,
-    );
     return result as FormAnalysis;
   }
 }

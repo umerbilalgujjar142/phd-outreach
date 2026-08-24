@@ -4,6 +4,8 @@
 /build
 /pdf
 /applications
+# Persistent browser profile for assisted apply — holds login cookies/session.
+/.browser-profile
 
 
 # Logs
@@ -62,3 +64,4 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+/job-cvs

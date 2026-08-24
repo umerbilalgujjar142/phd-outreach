@@ -17,6 +17,6 @@ import { FormAnalyzer } from './form-analyzer';
   imports: [ProfessorsModule, PersonalizationModule, DiscoveryModule],
   controllers: [ApplyController],
   providers: [ApplyService, FormAnalyzer, FillPlanner],
-  exports: [ApplyService],
+  exports: [ApplyService, FormAnalyzer],
 })
 export class ApplyModule {}

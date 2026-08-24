@@ -16,6 +16,15 @@ export class GmailController {
     return { connected: this.gmail.isConnected(), sender: this.gmail.senderAddress };
   }
 
+  /** Latest one-time code / verification link from the inbox (email-verify steps). */
+  @Get('gmail/otp')
+  otp(@Query('withinMinutes') withinMinutes?: string, @Query('query') query?: string) {
+    return this.gmail.readLatestOtp({
+      withinMinutes: withinMinutes ? Number(withinMinutes) : undefined,
+      query,
+    });
+  }
+
   @Get('gmail/connect')
   connect(@Res() res: Response) {
     return res.redirect(this.gmail.getAuthUrl());
