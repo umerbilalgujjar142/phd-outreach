@@ -30,11 +30,19 @@ export class JobDiscoveryService {
     private readonly jobs: JobsService,
   ) {
     // API-based sources first (reliable), HTML/Playwright ones after (best-effort).
-    // Indeed is intentionally excluded: it is Cloudflare bot-walled (returns a
-    // "Just a moment…" challenge), so it yields nothing and only slows the sweep.
-    // The scraper is kept in the codebase but not run.
-    void this.indeed;
-    this.sources = [this.remoteok, this.arbeitnow, this.naukrigulf, this.bayt, this.irishjobs];
+    // Indeed is Cloudflare-bot-managed but the scraper now WARMS the market
+    // homepage first (sets `__cf_bm`) before the search, which gets real job
+    // cards — verified 2026-08-24. Highest-volume board; ae.indeed.com = UAE =
+    // no-sponsorship priority wins. Best-effort: it degrades gracefully on a
+    // challenge so the API sources still carry the run.
+    this.sources = [
+      this.remoteok,
+      this.arbeitnow,
+      this.naukrigulf,
+      this.bayt,
+      this.irishjobs,
+      this.indeed,
+    ];
   }
 
   async runDiscovery(): Promise<JobDiscoveryRunResult[]> {

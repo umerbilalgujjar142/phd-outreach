@@ -395,6 +395,10 @@ export class JobApplyService {
     const proseFields: FormField[] = [];
 
     const noiseRe = /newsletter|subscribe|jobs? by email|job alert|search|promo|coupon|discount/i;
+    // Track whether the CV has been placed yet, so a generically-labelled file
+    // input ("Attach", "Upload", empty) gets the CV — but only the FIRST one, so
+    // we never dump the CV into every slot.
+    let cvAssigned = false;
     for (const f of fields) {
       const fieldText = `${f.label} ${f.name}`;
       if (noiseRe.test(fieldText)) {
@@ -423,11 +427,16 @@ export class JobApplyService {
               ? { ref: f.ref, label: f.label, action: 'upload', value: cl, reason: 'tailored cover letter' }
               : { ref: f.ref, label: f.label, action: 'skip', reason: 'no cover letter available' },
           );
-        } else if (/cv|resume|curriculum|lebenslauf/.test(label) || label === '') {
-          // CV/resume field, or an unlabeled single dropzone (almost always the CV).
+        } else if (
+          /cv|resume|résumé|curriculum|lebenslauf/.test(label) ||
+          (!cvAssigned && (label === '' || /attach|upload|choose file|document|drag|drop|file/.test(label)))
+        ) {
+          // CV/resume field, an unlabeled dropzone, or the first generic
+          // "Attach"/"Upload" file input — all almost always the CV slot.
           items.push({ ref: f.ref, label: f.label, action: 'upload', value: application.cvPath, reason: 'tailored CV' });
+          cvAssigned = true;
         } else {
-          // Portfolio / work sample / certificate / other — don't dump the CV here.
+          // Portfolio / work sample / certificate / photo — don't dump the CV here.
           items.push({ ref: f.ref, label: f.label, action: 'skip', reason: 'non-CV document — leave for human' });
         }
         continue;

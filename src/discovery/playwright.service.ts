@@ -52,6 +52,39 @@ export class PlaywrightService implements OnModuleDestroy {
   }
 
   /**
+   * Run `fn` with a single reusable context that the caller drives across many
+   * navigations. Optionally warms up first (visit `warmup` URLs so a bot
+   * manager's cookie — e.g. Cloudflare `__cf_bm` on Indeed — is set before the
+   * real requests; a cold hit straight to a search/deep URL gets 403/challenged,
+   * but the same URL passes once the session is warm). Assets are NOT aborted so
+   * the challenge JS can run. Always closes the context.
+   */
+  async withContext<T>(
+    fn: (context: BrowserContext) => Promise<T>,
+    opts: { warmup?: string[] } = {},
+  ): Promise<T> {
+    const browser = await this.getBrowser();
+    const context = await browser.newContext({
+      userAgent: INTERACTIVE_UA,
+      locale: 'en-US',
+      viewport: { width: 1280, height: 1400 },
+    });
+    try {
+      if (opts.warmup?.length) {
+        const page = await context.newPage();
+        for (const w of opts.warmup) {
+          await page.goto(w, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => undefined);
+          await page.waitForTimeout(3500);
+        }
+        await page.close().catch(() => undefined);
+      }
+      return await fn(context);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  }
+
+  /**
    * Open a page whose lifecycle the CALLER controls — used by the assisted-apply
    * flow, which fills a form, then holds the page open across a human review gap
    * before submitting. Unlike `withPage`, nothing is aborted (we need a faithful

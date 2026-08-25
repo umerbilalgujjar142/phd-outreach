@@ -16,7 +16,7 @@ import { JobDiscoveryService } from './discovery/job-discovery.service';
 import { JobPrepareService } from './documents/job-prepare.service';
 import { JobApplyScheduler } from './job-apply.scheduler';
 import { JobsService } from './jobs.service';
-import { JobListingStatus, RoleType } from './job-status.enum';
+import { JobApplicationStatus, JobListingStatus, RoleType } from './job-status.enum';
 
 @Controller('jobs')
 export class JobsController {
@@ -73,6 +73,24 @@ export class JobsController {
   @Post('autoprep')
   autoprep(@Body('enabled') enabled: boolean) {
     return { enabled: this.scheduler.setEnabled(!!enabled) };
+  }
+
+  // ---- tracker --------------------------------------------------------
+
+  /** Flat application tracker (one row per application, everything snapshotted). */
+  @Get('tracker')
+  tracker(
+    @Query('status') status?: JobApplicationStatus,
+    @Query('country') country?: string,
+    @Query('portal') portal?: string,
+  ) {
+    return this.jobs.trackerRows({ status, country, portal });
+  }
+
+  /** Rollup counts: totals by status / country / portal / role. */
+  @Get('tracker/summary')
+  trackerSummary() {
+    return this.jobs.trackerSummary();
   }
 
   // ---- assisted apply -------------------------------------------------

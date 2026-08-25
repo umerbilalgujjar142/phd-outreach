@@ -167,8 +167,30 @@ export class JobsService {
 
   // ---- applications ----------------------------------------------------
 
-  createApplication(data: Partial<JobApplication>): Promise<JobApplication> {
-    return this.applications.create(data as any);
+  /**
+   * Create an application row. Automatically snapshots the linked listing's
+   * title/company/country/portal/url onto the row so `job_applications` is a
+   * complete, self-contained tracker (no join needed to read what you applied
+   * to). Explicit values in `data` win over the snapshot.
+   */
+  async createApplication(data: Partial<JobApplication>): Promise<JobApplication> {
+    const snapshot: Partial<JobApplication> = {};
+    if (data.jobListingId) {
+      const l = await this.listings.findByPk(data.jobListingId);
+      if (l) {
+        Object.assign(snapshot, {
+          jobTitle: l.title,
+          company: l.company,
+          country: l.country,
+          location: l.location,
+          remote: l.remote,
+          portal: l.source,
+          jobUrl: l.url,
+          roleType: l.roleType,
+        });
+      }
+    }
+    return this.applications.create({ ...snapshot, ...data } as any);
   }
 
   async updateApplication(id: string, patch: Partial<JobApplication>): Promise<JobApplication> {
@@ -183,6 +205,57 @@ export class JobsService {
       where: { jobListingId },
       order: [['createdAt', 'DESC']],
     });
+  }
+
+  // ---- tracker (application history & rollups) -------------------------
+
+  /**
+   * Flat application tracker — every application with its snapshot fields,
+   * newest first. Optionally filter by status / country / portal. This is the
+   * "one table with everything" view for tracking what was applied to.
+   */
+  trackerRows(filter?: {
+    status?: JobApplicationStatus;
+    country?: string;
+    portal?: string;
+  }): Promise<JobApplication[]> {
+    const where: Record<string, unknown> = {};
+    if (filter?.status) where.status = filter.status;
+    if (filter?.country) where.country = filter.country;
+    if (filter?.portal) where.portal = filter.portal;
+    return this.applications.findAll({ where, order: [['createdAt', 'DESC']] });
+  }
+
+  /** Rollup counts so you can see totals by status / country / portal / role. */
+  async trackerSummary(): Promise<{
+    total: number;
+    submitted: number;
+    byStatus: Record<string, number>;
+    byCountry: Record<string, number>;
+    byPortal: Record<string, number>;
+    byRole: Record<string, number>;
+  }> {
+    const rows = await this.applications.findAll({
+      attributes: ['status', 'country', 'portal', 'roleType'],
+      raw: true,
+    });
+    const tally = (key: keyof (typeof rows)[number]) => {
+      const out: Record<string, number> = {};
+      for (const r of rows) {
+        const k = ((r as any)[key] ?? 'unknown') as string;
+        out[k] = (out[k] ?? 0) + 1;
+      }
+      return out;
+    };
+    const byStatus = tally('status');
+    return {
+      total: rows.length,
+      submitted: byStatus[JobApplicationStatus.SUBMITTED] ?? 0,
+      byStatus,
+      byCountry: tally('country'),
+      byPortal: tally('portal'),
+      byRole: tally('roleType'),
+    };
   }
 
   // ---- stats -----------------------------------------------------------

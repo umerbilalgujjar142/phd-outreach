@@ -19,11 +19,34 @@ export interface JobSource {
   }): Promise<ScrapedJob[]>;
 }
 
-/** The search terms every source queries with (Umer's target roles). */
+/**
+ * The search terms every source queries with — derived from Umer's CV stack
+ * (JS/TS, React/Next/React Native, Node/Express/NestJS, MERN, AWS, LLM/RAG).
+ * Deliberately NO off-stack terms (Python/.NET/Java/etc.) so we don't pull
+ * irrelevant postings; the matcher rejects those anyway, but not querying them
+ * keeps the sweep focused. Boards fuzzy-match, so these cover the field.
+ */
 export const JOB_QUERIES = [
-  'backend developer',
-  'node.js developer',
-  'full stack developer',
-  'react native developer',
+  // core roles
   'software engineer',
+  'full stack developer',
+  'full stack engineer',
+  'backend developer',
+  'frontend developer',
+  // JavaScript / TypeScript
+  'javascript developer',
+  'typescript developer',
+  // Node ecosystem
+  'node.js developer',
+  'nestjs developer',
+  'express developer',
+  // React ecosystem
+  'react developer',
+  'next.js developer',
+  'mern stack developer',
+  // Mobile (React Native)
+  'react native developer',
+  // AI / LLM (RAG, OpenAI/Claude integration)
+  'ai engineer',
+  'llm engineer',
 ];

@@ -45,6 +45,41 @@ export class JobApplication extends Model<JobApplication> {
   @BelongsTo(() => JobListing)
   listing: JobListing;
 
+  // --- snapshot of the listing at apply time -----------------------------
+  // Denormalised so this single table is a complete, self-contained tracker:
+  // you can read title/company/country/portal/url without joining. Filled by
+  // JobsService.createApplication from the linked listing.
+
+  /** Job title applied to. */
+  @Column({ type: DataType.STRING, allowNull: true, field: 'job_title' })
+  jobTitle: string;
+
+  /** Employer / company name. */
+  @Column({ type: DataType.STRING, allowNull: true })
+  company: string;
+
+  /** Country of the role (for "how many per country" tracking). */
+  @Index('job_applications_country_ix')
+  @Column({ type: DataType.STRING, allowNull: true })
+  country: string;
+
+  /** City / free-text location, when known. */
+  @Column({ type: DataType.STRING, allowNull: true })
+  location: string;
+
+  /** Whether the role is remote. */
+  @Column({ type: DataType.BOOLEAN, allowNull: true })
+  remote: boolean;
+
+  /** Which board/portal the job came from (e.g. irishjobs, arbeitnow, bayt). */
+  @Index('job_applications_portal_ix')
+  @Column({ type: DataType.STRING, allowNull: true })
+  portal: string;
+
+  /** Canonical posting URL. */
+  @Column({ type: DataType.TEXT, allowNull: true, field: 'job_url' })
+  jobUrl: string;
+
   /** Role family this application presented as (which CV was tailored). */
   @Default(RoleType.OTHER)
   @Column({ type: DataType.ENUM(...ROLE_TYPES), allowNull: false, field: 'role_type' })
