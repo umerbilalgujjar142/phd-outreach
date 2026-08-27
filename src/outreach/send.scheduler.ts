@@ -1,12 +1,10 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { Queue } from 'bullmq';
 import { GmailService } from '../gmail/gmail.service';
-import { JobRunsService } from '../job-runs/job-runs.service';
-import { PersonalizationService } from '../personalization/personalization.service';
-import { OutreachService } from './outreach.service';
-
-const JOB = 'outreach-send';
+import { OUTREACH_QUEUE, OUTREACH_REPLY_JOB, OUTREACH_SEND_JOB } from '../queue/queue.constants';
 
 /**
  * Step 6 (PROJECT.md Section 8): rate-limited automated sending. Instead of one
@@ -14,20 +12,22 @@ const JOB = 'outreach-send';
  * a time, spread across working hours, capped at the daily quota. Auto-send is
  * OFF by default so restarts never fire emails unexpectedly — toggle it on via
  * POST /outreach/autosend once you're ready to go live.
+ *
+ * This class is now only the ENQUEUE trigger: the Cron ticks push a job onto the
+ * `outreach-send` BullMQ queue (visible in Bull Board), and SendProcessor does
+ * the actual sending with concurrency 1. The runtime on/off toggle and status
+ * still live here (used by OutreachController).
  */
 @Injectable()
 export class SendScheduler implements OnModuleInit {
   private readonly logger = new Logger(SendScheduler.name);
   private enabled: boolean;
   private readonly perTickMax: number;
-  private ticking = false;
 
   constructor(
+    @InjectQueue(OUTREACH_QUEUE) private readonly queue: Queue,
     private readonly config: ConfigService,
-    private readonly outreach: OutreachService,
-    private readonly personalization: PersonalizationService,
     private readonly gmail: GmailService,
-    private readonly jobRuns: JobRunsService,
   ) {
     this.enabled = /^true$/i.test(this.config.get<string>('OUTREACH_AUTOSEND') ?? 'false');
     this.perTickMax = Number(this.config.get('SEND_PER_TICK_MAX') ?? 3);
@@ -56,70 +56,51 @@ export class SendScheduler implements OnModuleInit {
   }
 
   /**
-   * Hourly increment — runs around the clock (each professor is emailed only
-   * during THEIR local daytime, decided per-professor in the send batch), small,
-   * jittered, quota-bounded.
+   * Hourly increment — enqueues a small, jittered, quota-bounded send job (each
+   * professor is emailed only during THEIR local daytime, decided per-professor
+   * inside the send batch). A per-hour jobId de-dupes so a long-running send is
+   * never piled on by the next tick.
    */
   @Cron(CronExpression.EVERY_HOUR)
   async tick(): Promise<void> {
     if (!this.enabled) return;
-    if (this.ticking) return; // avoid overlap if a tick runs long
     if (!this.gmail.isConnected()) {
       this.logger.warn('Auto-send on but Gmail not connected — skipping tick.');
       return;
     }
-
-    this.ticking = true;
-    try {
-      await this.jobRuns.markRunning(JOB);
-      // Keep the pool flowing: personalize a few pending before sending.
-      await this.personalization.personalizePending(this.perTickMax);
-
-      const limit = this.randomInt(1, this.perTickMax);
-      const delayMs = this.randomInt(3000, 9000);
-      const res = await this.outreach.sendDailyBatch({ limit, delayMs });
-
-      if (res.attempted > 0) {
-        this.logger.log(
-          `Tick: sent ${res.sent}/${res.attempted} (today=${res.sentToday + res.sent}, quota left=${res.remainingQuota - res.sent})`,
-        );
-      }
-      await this.jobRuns.markSuccess(JOB, `sent ${res.sent}, quota left ${res.remainingQuota - res.sent}`);
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Send tick failed: ${msg}`);
-      await this.jobRuns.markError(JOB, msg);
-    } finally {
-      this.ticking = false;
-    }
+    await this.queue.add(
+      OUTREACH_SEND_JOB,
+      {
+        perTickMax: this.perTickMax,
+        limit: this.randomInt(1, this.perTickMax),
+        delayMs: this.randomInt(3000, 9000),
+      },
+      { jobId: `${OUTREACH_SEND_JOB}-${this.hourBucket()}` },
+    );
   }
 
   /**
    * Steps 8-9: every 3 hours, always check for replies (read-only, harmless),
-   * and — when auto-send is on — send any follow-ups now due (each still gated
-   * to the professor's local working hours inside sendDueFollowups).
+   * and — when auto-send is on — send any follow-ups now due. The processor
+   * enforces both; we pass the current toggle so the read-only reply check still
+   * runs even while sending is paused.
    */
   @Cron(CronExpression.EVERY_3_HOURS)
   async replyTick(): Promise<void> {
     if (!this.gmail.isConnected()) return;
-    try {
-      const replies = await this.outreach.checkReplies();
-      if (replies.newReplies > 0) {
-        this.logger.log(`Reply check: ${replies.newReplies} new repl${replies.newReplies === 1 ? 'y' : 'ies'}`);
-      }
-      if (this.enabled) {
-        const f = await this.outreach.sendDueFollowups({
-          limit: this.perTickMax,
-          delayMs: this.randomInt(3000, 9000),
-        });
-        if (f.sent > 0) this.logger.log(`Follow-ups: sent ${f.sent}/${f.due}`);
-      }
-    } catch (err) {
-      this.logger.error(`Reply/follow-up tick failed: ${(err as Error).message}`);
-    }
+    await this.queue.add(
+      OUTREACH_REPLY_JOB,
+      { enabled: this.enabled, perTickMax: this.perTickMax, delayMs: this.randomInt(3000, 9000) },
+      { jobId: `${OUTREACH_REPLY_JOB}-${this.hourBucket()}` },
+    );
   }
 
   private randomInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  /** `YYYY-MM-DDTHH` — a stable id per calendar hour for jobId de-duplication. */
+  private hourBucket(): string {
+    return new Date().toISOString().slice(0, 13);
   }
 }

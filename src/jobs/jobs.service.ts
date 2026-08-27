@@ -6,6 +6,7 @@ import { ScrapedJob } from './discovery/job-discovery.types';
 import { SeenJob } from './discovery/seen-job.model';
 import { JobMatchResult } from './matching/job-matching.service';
 import { JobApplication } from './job-application.model';
+import { JobApplied } from './job-applied.model';
 import { JobListing } from './job-listing.model';
 import {
   JobApplicationStatus,
@@ -22,6 +23,7 @@ export class JobsService {
   constructor(
     @InjectModel(JobListing) private readonly listings: typeof JobListing,
     @InjectModel(JobApplication) private readonly applications: typeof JobApplication,
+    @InjectModel(JobApplied) private readonly applied: typeof JobApplied,
     @InjectModel(SeenJob) private readonly seen: typeof SeenJob,
     private readonly config: ConfigService,
   ) {
@@ -159,9 +161,13 @@ export class JobsService {
     return status;
   }
 
-  async setStatus(id: string, status: JobListingStatus): Promise<JobListing> {
+  async setStatus(
+    id: string,
+    status: JobListingStatus,
+    reason?: string,
+  ): Promise<JobListing> {
     const row = await this.findOne(id);
-    await row.update({ status } as never);
+    await row.update((reason ? { status, reason } : { status }) as never);
     return row;
   }
 
@@ -252,6 +258,100 @@ export class JobsService {
       total: rows.length,
       submitted: byStatus[JobApplicationStatus.SUBMITTED] ?? 0,
       byStatus,
+      byCountry: tally('country'),
+      byPortal: tally('portal'),
+      byRole: tally('roleType'),
+    };
+  }
+
+  // ---- applied log (clean "what I actually applied to" table) ----------
+
+  /**
+   * Append a row to `job_applied` the moment a submit is confirmed. Snapshots
+   * the listing so the log is self-contained (position / company / country /
+   * portal / url — no join needed). Idempotent per listing: a re-submit updates
+   * the existing row instead of duplicating, keeping the daily/country counts
+   * honest.
+   */
+  async recordApplied(data: {
+    jobListingId: string;
+    applicationId?: string;
+    cvPath?: string;
+    screenshotPath?: string;
+  }): Promise<JobApplied> {
+    const listing = await this.listings.findByPk(data.jobListingId);
+    const app = data.applicationId
+      ? await this.applications.findByPk(data.applicationId)
+      : null;
+    const row = {
+      jobListingId: data.jobListingId,
+      applicationId: data.applicationId ?? null,
+      position: listing?.title ?? app?.jobTitle ?? 'unknown',
+      company: listing?.company ?? app?.company ?? null,
+      country: listing?.country ?? app?.country ?? null,
+      location: listing?.location ?? app?.location ?? null,
+      remote: listing?.remote ?? app?.remote ?? null,
+      portal: listing?.source ?? app?.portal ?? null,
+      jobUrl: listing?.url ?? app?.jobUrl ?? null,
+      roleType: listing?.roleType ?? app?.roleType ?? RoleType.OTHER,
+      cvVariant: app?.cvVariant ?? null,
+      cvPath: data.cvPath ?? app?.cvPath ?? null,
+      screenshotPath: data.screenshotPath ?? null,
+      appliedAt: new Date(),
+    };
+    const existing = await this.applied.findOne({
+      where: { jobListingId: data.jobListingId },
+    });
+    if (existing) {
+      await existing.update(row as never);
+      return existing;
+    }
+    return this.applied.create(row as any);
+  }
+
+  /** The clean applied log, newest first. Optional country / portal filter. */
+  appliedLog(filter?: { country?: string; portal?: string }): Promise<JobApplied[]> {
+    const where: Record<string, unknown> = {};
+    if (filter?.country) where.country = filter.country;
+    if (filter?.portal) where.portal = filter.portal;
+    return this.applied.findAll({ where, order: [['appliedAt', 'DESC']] });
+  }
+
+  /** Everything applied to since local midnight today, newest first. */
+  appliedToday(): Promise<JobApplied[]> {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return this.applied.findAll({
+      where: { appliedAt: { [Op.gte]: start } },
+      order: [['appliedAt', 'DESC']],
+    });
+  }
+
+  /** How many applied-to jobs, total and today, with by-country/portal/role counts. */
+  async appliedSummary(): Promise<{
+    total: number;
+    today: number;
+    byCountry: Record<string, number>;
+    byPortal: Record<string, number>;
+    byRole: Record<string, number>;
+  }> {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const [rows, today] = await Promise.all([
+      this.applied.findAll({ attributes: ['country', 'portal', 'roleType'], raw: true }),
+      this.applied.count({ where: { appliedAt: { [Op.gte]: start } } }),
+    ]);
+    const tally = (key: keyof (typeof rows)[number]) => {
+      const out: Record<string, number> = {};
+      for (const r of rows) {
+        const k = ((r as any)[key] ?? 'unknown') as string;
+        out[k] = (out[k] ?? 0) + 1;
+      }
+      return out;
+    };
+    return {
+      total: rows.length,
+      today,
       byCountry: tally('country'),
       byPortal: tally('portal'),
       byRole: tally('roleType'),

@@ -75,6 +75,18 @@ export class JobsController {
     return { enabled: this.scheduler.setEnabled(!!enabled) };
   }
 
+  /** Toggle the auto-apply scheduler (submits clean forms without review). */
+  @Post('autoapply')
+  autoapply(@Body('enabled') enabled: boolean) {
+    return { autoApply: this.scheduler.setAutoApply(!!enabled) };
+  }
+
+  /** Kick an apply run right now instead of waiting for the hourly tick. */
+  @Post('apply/run')
+  runApply() {
+    return this.scheduler.runNow();
+  }
+
   // ---- tracker --------------------------------------------------------
 
   /** Flat application tracker (one row per application, everything snapshotted). */
@@ -91,6 +103,26 @@ export class JobsController {
   @Get('tracker/summary')
   trackerSummary() {
     return this.jobs.trackerSummary();
+  }
+
+  // ---- applied log (clean "what I actually applied to" table) ---------
+
+  /** Clean log of jobs actually applied to (one row per listing), newest first. */
+  @Get('applied')
+  applied(@Query('country') country?: string, @Query('portal') portal?: string) {
+    return this.jobs.appliedLog({ country, portal });
+  }
+
+  /** Just what was applied to today (since local midnight). */
+  @Get('applied/today')
+  appliedToday() {
+    return this.jobs.appliedToday();
+  }
+
+  /** Applied rollup: total, today, and counts by country / portal / role. */
+  @Get('applied/summary')
+  appliedSummary() {
+    return this.jobs.appliedSummary();
   }
 
   // ---- assisted apply -------------------------------------------------

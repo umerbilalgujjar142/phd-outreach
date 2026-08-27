@@ -8,7 +8,7 @@ import { DiscoveryModule } from '../discovery/discovery.module';
 import { GmailModule } from '../gmail/gmail.module';
 import { JobRunsModule } from '../job-runs/job-runs.module';
 import { PersonalizationModule } from '../personalization/personalization.module';
-import { JOB_DISCOVERY_QUEUE } from '../queue/queue.constants';
+import { JOB_APPLY_QUEUE, JOB_DISCOVERY_QUEUE } from '../queue/queue.constants';
 import { JobApplyService } from './apply/job-apply.service';
 import { ArbeitnowScraper } from './discovery/arbeitnow.scraper';
 import { BaytScraper } from './discovery/bayt.scraper';
@@ -23,8 +23,10 @@ import { SeenJob } from './discovery/seen-job.model';
 import { CoverLetterService } from './documents/cover-letter.service';
 import { CvTailorService } from './documents/cv-tailor.service';
 import { JobPrepareService } from './documents/job-prepare.service';
+import { JobApplyProcessor } from './job-apply.processor';
 import { JobApplyScheduler } from './job-apply.scheduler';
 import { JobApplication } from './job-application.model';
+import { JobApplied } from './job-applied.model';
 import { JobListing } from './job-listing.model';
 import { JobMatchingService } from './matching/job-matching.service';
 import { JobsController } from './jobs.controller';
@@ -38,9 +40,10 @@ import { JobsService } from './jobs.service';
  */
 @Module({
   imports: [
-    BullModule.registerQueue({ name: JOB_DISCOVERY_QUEUE }),
+    BullModule.registerQueue({ name: JOB_DISCOVERY_QUEUE }, { name: JOB_APPLY_QUEUE }),
     BullBoardModule.forFeature({ name: JOB_DISCOVERY_QUEUE, adapter: BullMQAdapter }),
-    SequelizeModule.forFeature([JobListing, JobApplication, SeenJob]),
+    BullBoardModule.forFeature({ name: JOB_APPLY_QUEUE, adapter: BullMQAdapter }),
+    SequelizeModule.forFeature([JobListing, JobApplication, JobApplied, SeenJob]),
     JobRunsModule,
     PersonalizationModule,
     DiscoveryModule,
@@ -65,6 +68,7 @@ import { JobsService } from './jobs.service';
     JobPrepareService,
     JobApplyService,
     JobApplyScheduler,
+    JobApplyProcessor,
   ],
   exports: [JobsService],
 })

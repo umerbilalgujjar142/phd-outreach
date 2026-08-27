@@ -13,7 +13,7 @@ import { PersonalizationService } from '../../personalization/personalization.se
 import { CoverLetterService } from '../documents/cover-letter.service';
 import { JobPrepareService } from '../documents/job-prepare.service';
 import { JobsService } from '../jobs.service';
-import { JOB_APPLICANT, JOB_OWNER_PROFILE, jobSalaryExpectation } from '../job-profile';
+import { JOB_APPLICANT, JOB_OWNER_PROFILE, JOB_SCREENING, jobSalaryExpectation } from '../job-profile';
 import { JobApplication } from '../job-application.model';
 import { JobListing } from '../job-listing.model';
 import { JobApplicationStatus, JobListingStatus } from '../job-status.enum';
@@ -66,6 +66,7 @@ export class JobApplyService {
   private readonly sessions = new Map<string, JobApplySession>();
   private readonly outDir: string;
   private readonly headful: boolean;
+  private readonly saveShots: boolean;
   private readonly loginEmail: string;
   private readonly loginPassword: string;
 
@@ -81,10 +82,25 @@ export class JobApplyService {
   ) {
     this.outDir = join(this.config.get<string>('APPLY_DIR') ?? './applications', 'job-sessions');
     this.headful = !/^false$/i.test(this.config.get<string>('APPLY_HEADFUL') ?? 'true');
+    // Screenshots are OFF by default — in hands-off mode nobody reviews them and
+    // they pile up fast. Set APPLY_SAVE_SCREENSHOTS=true to keep them for debugging.
+    this.saveShots = /^true$/i.test(this.config.get<string>('APPLY_SAVE_SCREENSHOTS') ?? 'false');
     this.loginEmail =
       this.config.get<string>('APPLICANT_EMAIL') ?? JOB_APPLICANT.email;
     this.loginPassword = this.config.get<string>('APPLICANT_PASSWORD') ?? '';
+  }
+
+  /**
+   * Take a full-page screenshot only when screenshots are enabled, creating the
+   * output dir lazily so nothing is written (and no folder recreated) when off.
+   * Returns the saved path, or '' when disabled/failed.
+   */
+  private async snap(target: Page, name: string): Promise<string> {
+    if (!this.saveShots) return '';
     if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
+    const p = join(this.outDir, name);
+    await target.screenshot({ path: p, fullPage: true }).catch(() => undefined);
+    return p;
   }
 
   /** Fill the form for a listing and hold it open for review. Does NOT submit. */
@@ -134,8 +150,7 @@ export class JobApplyService {
         .count()
         .catch(() => 0);
       if (ineligible > 0) {
-        const shot = join(this.outDir, `${randomUUID()}.png`);
-        await page.screenshot({ path: shot, fullPage: true }).catch(() => undefined);
+        const shot = await this.snap(page, `${randomUUID()}.png`);
         const reason =
           'The board shows Apply as "Unavailable" for this session — usually a logged-out session ' +
           'or a posting that has stopped accepting applications. Warm a logged-in profile ' +
@@ -150,6 +165,27 @@ export class JobApplyService {
       }
 
       const formPage = await this.navigateToForm(page);
+
+      // Draft-first ATS guard (e.g. JOIN.com). These create a half-finished
+      // application and email the applicant "complete your application" the moment
+      // Submit is clicked, because a hidden required question always blocks the
+      // final submit — spamming the inbox with drafts we never complete. Bail out
+      // BEFORE filling anything (no email entered → no draft → no email). The
+      // autonomous processor parks this as SKIPPED.
+      if (this.isSkippedAts(formPage.url())) {
+        const reason =
+          'Skipped JOIN.com (draft-first ATS): it emails "complete your application" the instant ' +
+          'Submit is clicked but a hidden required question blocks the real submit — so it only ' +
+          'creates inbox spam, never a real application. Parked before entering any data.';
+        await context.close().catch(() => undefined);
+        await this.jobs.updateApplication(application.id, {
+          status: JobApplicationStatus.FAILED,
+          error: reason,
+        } as Partial<JobApplication>);
+        this.logger.log(`Skipped draft-first ATS for "${listing.title}" @ ${listing.company}: ${formPage.url()}`);
+        return { status: 'needs_manual', listingId, applyUrl, landedUrl: formPage.url(), message: reason };
+      }
+
       // Frame-aware: search the top page AND any iframes for the richest form.
       const { analysis, root } = await this.analyzer.analyzeBest(formPage);
 
@@ -165,8 +201,7 @@ export class JobApplyService {
       const blocking = analysis.hardBlockers.filter((b) => !/captcha/i.test(b));
       const hasCaptcha = analysis.hardBlockers.some((b) => /captcha/i.test(b));
       if (blocking.length || !isForm) {
-        const shot = join(this.outDir, `${randomUUID()}.png`);
-        await formPage.screenshot({ path: shot, fullPage: true }).catch(() => undefined);
+        const shot = await this.snap(formPage, `${randomUUID()}.png`);
         const reason = blocking.length
           ? blocking.join('; ')
           : 'No real application form reached (likely an external ATS behind an "Apply" redirect).';
@@ -191,8 +226,7 @@ export class JobApplyService {
       const { filled, skipped } = await this.execute(root, plan, application);
 
       const sessionId = randomUUID();
-      const screenshotPath = join(this.outDir, `${sessionId}.png`);
-      await formPage.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined);
+      const screenshotPath = await this.snap(formPage, `${sessionId}.png`);
 
       this.sessions.set(sessionId, {
         id: sessionId,
@@ -258,8 +292,7 @@ export class JobApplyService {
     }
     await s.page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
     await s.page.waitForTimeout(1800);
-    const resultShot = join(this.outDir, `${sessionId}-result.png`);
-    await s.page.screenshot({ path: resultShot, fullPage: true }).catch(() => undefined);
+    const resultShot = await this.snap(s.page, `${sessionId}-result.png`);
 
     const confirmed = await this.verifySubmitted(s);
     if (!confirmed) {
@@ -287,6 +320,16 @@ export class JobApplyService {
       screenshotPath: resultShot,
     } as Partial<JobApplication>);
     await this.jobs.setStatus(s.listingId, JobListingStatus.APPLIED);
+    // Append to the clean "jobs I actually applied to" log (idempotent per listing).
+    await this.jobs
+      .recordApplied({
+        jobListingId: s.listingId,
+        applicationId: s.applicationId,
+        screenshotPath: resultShot,
+      })
+      .catch((err) =>
+        this.logger.warn(`Applied-log write failed for ${s.title}: ${(err as Error).message}`),
+      );
     this.cleanup(sessionId);
 
     this.logger.log(`Submitted + confirmed job application for ${s.title} @ ${s.company}`);
@@ -405,8 +448,33 @@ export class JobApplyService {
         items.push({ ref: f.ref, label: f.label, action: 'skip', reason: 'newsletter/search field — not part of the application' });
         continue;
       }
+      // Choice fields (checkbox / radio): answer the standard screening +
+      // consent questions from Umer's stated profile so clean forms can submit;
+      // anything we don't recognize is left unchecked for safety.
       if (f.type === 'checkbox' || f.type === 'radio') {
-        items.push({ ref: f.ref, label: f.label, action: 'skip', reason: 'consent/option — leave for human' });
+        const decided = this.screeningForChoice(f);
+        items.push(
+          decided
+            ? { ref: f.ref, label: f.label, action: 'check', reason: decided }
+            : { ref: f.ref, label: f.label, action: 'skip', reason: 'option — leave for human' },
+        );
+        continue;
+      }
+      // <select> dropdowns: pick the screening answer, or map an identity option
+      // (country / nationality) by text; else leave for a human.
+      if (f.tag === 'select') {
+        const chosen = this.screeningForSelect(f);
+        if (chosen) {
+          items.push({ ref: f.ref, label: f.label, action: 'select', value: chosen.value, reason: chosen.reason });
+          continue;
+        }
+        const rule = TEXT_RULES.find((r) => r.test.test(f.label) || r.test.test(f.name));
+        const mapped = rule?.value() ? this.pickOptionByText(f.options, rule.value()) : undefined;
+        items.push(
+          mapped
+            ? { ref: f.ref, label: f.label, action: 'select', value: mapped, reason: 'mapped from profile' }
+            : { ref: f.ref, label: f.label, action: 'skip', reason: 'dropdown — leave for human' },
+        );
         continue;
       }
       if (f.type === 'file') {
@@ -478,6 +546,84 @@ export class JobApplyService {
     return items;
   }
 
+  /**
+   * Classify a screening question from its label/name and return the answer
+   * Umer wants, or null if it isn't one we recognize. Order matters: the
+   * "without sponsorship" phrasing must beat the generic "sponsor" rule.
+   */
+  private detectScreening(text: string): 'yes' | 'no' | 'male' | 'decline' | null {
+    const t = text.toLowerCase();
+    // "Can you work WITHOUT sponsorship?" → No (Umer needs sponsorship).
+    if (/without (visa )?sponsorship|not require sponsorship|no sponsorship|work without/.test(t)) {
+      return JOB_SCREENING.requiresSponsorship ? 'no' : 'yes';
+    }
+    if (/sponsor/.test(t)) return JOB_SCREENING.requiresSponsorship ? 'yes' : 'no';
+    if (/authori[sz]ed to work|eligible to work|right to work|permission to work|legally.*(work|authori)|work (permit|authori)/.test(t)) {
+      return JOB_SCREENING.authorizedToWork ? 'yes' : 'no';
+    }
+    if (/relocat|willing to move|open to (a )?move/.test(t)) {
+      return JOB_SCREENING.willingToRelocate ? 'yes' : 'no';
+    }
+    if (/\bgender\b|\bsex\b/.test(t)) return 'male';
+    if (/race|ethnic|hispanic|latino|veteran|disabilit|self-?identif/.test(t)) return 'decline';
+    return null;
+  }
+
+  /** Does an option's visible text represent the desired answer token? */
+  private optionMatches(text: string, want: 'yes' | 'no' | 'male' | 'decline'): boolean {
+    const t = text.trim().toLowerCase();
+    if (!t) return false;
+    if (want === 'yes') return /^y(es)?\b/.test(t) || t === 'true';
+    if (want === 'no') return /^no?\b/.test(t) || t === 'false';
+    if (want === 'male') return /\bmale\b/.test(t) && !/female/.test(t);
+    return /decline|prefer not|do(n'?| no)t wish|not to (say|answer|identif)|choose not|rather not/.test(t);
+  }
+
+  /**
+   * Decide whether to CHECK a checkbox/radio. Consent/terms boxes are agreed;
+   * a screening radio is checked only when its own option is the answer Umer
+   * wants (the other options in the group return null → left unchecked).
+   */
+  private screeningForChoice(f: FormField): string | null {
+    const text = `${f.label} ${f.name}`;
+    if (
+      f.type === 'checkbox' &&
+      /agree|terms|consent|privacy|gdpr|data protection|policy|declaration|i confirm|i understand|process my/i.test(text)
+    ) {
+      return 'consent/terms — agreed';
+    }
+    const want = this.detectScreening(text);
+    if (!want) return null;
+    // A standalone checkbox asserting a statement (e.g. "I require sponsorship"):
+    // check it when the answer is affirmative.
+    if (f.type === 'checkbox') return want === 'yes' ? `screening: ${want}` : null;
+    // Radio: check only the option matching the desired answer.
+    return this.optionMatches(f.label, want) ? `screening: ${want}` : null;
+  }
+
+  /** Pick the <select> option value for a screening question, if recognized. */
+  private screeningForSelect(f: FormField): { value: string; reason: string } | null {
+    const want = this.detectScreening(`${f.label} ${f.name}`);
+    if (!want || !f.options?.length) return null;
+    const opt = f.options.find((o) => this.optionMatches(o.text, want));
+    return opt ? { value: opt.value, reason: `screening: ${want}` } : null;
+  }
+
+  /** Pick the option whose visible text best matches a target string. */
+  private pickOptionByText(
+    options: { value: string; text: string }[] | undefined,
+    target: string,
+  ): string | undefined {
+    if (!options?.length || !target) return undefined;
+    const t = target.trim().toLowerCase();
+    const exact = options.find((o) => o.text.trim().toLowerCase() === t);
+    if (exact) return exact.value;
+    const partial = options.find(
+      (o) => o.text.toLowerCase().includes(t) || t.includes(o.text.trim().toLowerCase()),
+    );
+    return partial?.value;
+  }
+
   private looksLikeQuestion(label: string): boolean {
     return /why|describe|explain|motivat|cover|experience|tell us|about you|salary|notice period|available/i.test(label);
   }
@@ -532,6 +678,7 @@ Output ONLY a JSON object mapping each ref to its answer, wrapped exactly betwee
       try {
         if (item.action === 'fill') await root.fill(selector, item.value ?? '');
         else if (item.action === 'select') await root.selectOption(selector, item.value ?? '');
+        else if (item.action === 'check') await root.check(selector, { force: true });
         else if (item.action === 'upload') {
           if (!item.value || !existsSync(item.value)) {
             skipped.push({ ...item, reason: `document not found: ${item.value}` });
@@ -620,6 +767,22 @@ Output ONLY a JSON object mapping each ref to its answer, wrapped exactly betwee
       return ['https://www.irishjobs.ie/', 'https://www.irishjobs.ie/jobs/software-developer'];
     }
     return [];
+  }
+
+  /**
+   * ATS hosts we deliberately never auto-apply to because they create a
+   * half-finished draft + "complete your application" email on Submit-click
+   * (a hidden required question always blocks the real submit). Env-extendable
+   * via SKIP_ATS_HOSTS (comma-separated substrings).
+   */
+  private isSkippedAts(url: string): boolean {
+    const extra = (this.config.get<string>('SKIP_ATS_HOSTS') ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const hosts = ['join.com', ...extra];
+    const u = url.toLowerCase();
+    return hosts.some((h) => u.includes(h));
   }
 
   private async navigateToForm(page: Page): Promise<Page> {

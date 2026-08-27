@@ -11,6 +11,7 @@ import {
   CV_LANGUAGES,
   CvVariant,
   cvVariantFor,
+  REAL_CV_FILES,
   SKILL_INVENTORY,
 } from '../job-profile';
 import { JobListing } from '../job-listing.model';
@@ -31,23 +32,47 @@ interface TailoredContent {
 export class CvTailorService {
   private readonly logger = new Logger(CvTailorService.name);
   private readonly outDir: string;
+  /** Umer's real hand-designed CVs by variant (env-overridable). */
+  private readonly realCvFiles: Record<'backend' | 'fullstack' | 'mobile', string>;
 
   constructor(
     private readonly personalization: PersonalizationService,
     private readonly config: ConfigService,
   ) {
     const base = this.config.get<string>('APPLY_DIR') ?? './applications';
+    // Created lazily only if a fallback CV must actually be generated — with the
+    // real CVs present this dir normally never appears.
     this.outDir = join(base, 'cvs');
-    if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
+    this.realCvFiles = {
+      backend: this.config.get<string>('CV_BACKEND_PATH') ?? REAL_CV_FILES.backend,
+      fullstack: this.config.get<string>('CV_FULLSTACK_PATH') ?? REAL_CV_FILES.fullstack,
+      mobile: this.config.get<string>('CV_MOBILE_PATH') ?? REAL_CV_FILES.mobile,
+    };
   }
 
-  /** Tailor + render the CV for a listing. Returns the PDF path + variant key. */
+  /**
+   * Resolve the CV to attach for a listing. Prefers Umer's REAL hand-designed
+   * PDF for the role family (used as-is — the polished original beats a
+   * generated one). Only if that file is missing does it fall back to
+   * generating a JD-tailored PDF, so the pipeline never breaks. Returns the PDF
+   * path + variant key.
+   */
   async tailor(listing: JobListing): Promise<{ path: string; variant: string }> {
     const variant = cvVariantFor(listing.roleType);
+    const real = this.realCvFiles[variant.key as 'backend' | 'fullstack' | 'mobile'];
+    if (real && existsSync(real)) {
+      this.logger.log(`Using real ${variant.key} CV for "${listing.title}" @ ${listing.company}`);
+      return { path: real, variant: variant.key };
+    }
+
+    this.logger.warn(
+      `Real ${variant.key} CV not found at "${real}" — generating a fallback CV instead.`,
+    );
+    if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
     const tailored = await this.tailorContent(variant, listing);
     const path = join(this.outDir, `CV_${this.slug(listing)}.pdf`);
     await this.render(path, variant, tailored);
-    this.logger.log(`Tailored ${variant.key} CV for "${listing.title}" @ ${listing.company}`);
+    this.logger.log(`Generated fallback ${variant.key} CV for "${listing.title}" @ ${listing.company}`);
     return { path, variant: variant.key };
   }
 

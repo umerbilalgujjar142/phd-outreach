@@ -21,7 +21,7 @@ import { QueueModule } from './queue/queue.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
-    // Visual BullMQ dashboard at http://localhost:5000/admin/queues
+    // Visual BullMQ dashboard at http://localhost:5001/admin/queues
     BullBoardModule.forRoot({ route: '/admin/queues', adapter: ExpressAdapter }),
     DatabaseModule,
     QueueModule,

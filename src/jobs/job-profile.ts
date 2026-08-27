@@ -21,7 +21,7 @@ export const CV_HEADER = {
   location: 'Al Warqa, Dubai, UAE',
   visa: 'UAE Employment Visa Holder',
   linkedin: 'linkedin.com/in/muhammad-umer-bilal-b1a9391a2',
-  github: 'github.com/UmerBilal',
+  github: 'github.com/umerbilalgujjar142',
 };
 
 /** One fixed employment/project block. Bullets are real and must not change. */
@@ -307,6 +307,20 @@ export const SKILL_INVENTORY: string[] = Array.from(
   ]),
 );
 
+/**
+ * Umer's REAL, hand-designed CV PDFs (the ones he uses daily). Attached to
+ * applications AS-IS per role family — his polished design beats a generated
+ * one, and the PDF text can't be safely edited without breaking the layout.
+ * Per-JD adaptation therefore happens in the cover letter + form answers, not
+ * the CV. Paths overridable via env (CV_BACKEND_PATH / CV_FULLSTACK_PATH /
+ * CV_MOBILE_PATH).
+ */
+export const REAL_CV_FILES: Record<'backend' | 'fullstack' | 'mobile', string> = {
+  backend: '/Users/muhammadumerbilal/Documents/MUHAMMAD-UMER-BILAL-Backend-Developer.pdf',
+  fullstack: '/Users/muhammadumerbilal/Documents/MUHAMMAD-UMER-BILAL-Full-Stack-Developer.pdf',
+  mobile: '/Users/muhammadumerbilal/Documents/MUHAMMAD-UMER-BILAL-Mobile-Application-Developer.pdf',
+};
+
 /** Pick the base CV variant for a role classification. */
 export function cvVariantFor(role: RoleType): CvVariant {
   if (role === RoleType.BACKEND) return CV_VARIANTS.backend;
@@ -367,6 +381,26 @@ export const JOB_APPLICANT = {
   earliestStart: 'One month from offer',
   /** Safe, truthful default until Umer provides per-market ranges. */
   salaryExpectation: 'Negotiable / open to discussion',
+  /** Gender, for demographic form fields. */
+  gender: 'Male',
+};
+
+/**
+ * Umer's fixed answers to the standard screening questions ATS forms gate
+ * submission on. Set explicitly by Umer (not inferred), so the auto-filler can
+ * complete these choice fields and let clean forms actually submit:
+ *   • authorized to work / right to work → YES (works in any country)
+ *   • require visa sponsorship           → YES (needs sponsorship)
+ *   • willing to relocate                → YES
+ *   • gender                             → Male
+ *   • race / veteran / disability (EEO)  → prefer not to say (Umer didn't
+ *     specify; declining is honest and still lets the form submit)
+ */
+export const JOB_SCREENING = {
+  authorizedToWork: true,
+  requiresSponsorship: true,
+  willingToRelocate: true,
+  gender: 'Male',
 };
 
 /** Terse prose profile for Claude prompts (cover letters, form answers). */

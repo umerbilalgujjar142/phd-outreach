@@ -27,7 +27,7 @@ export interface FormAnalysis {
 export interface FillPlanItem {
   ref: string;
   label: string;
-  action: 'fill' | 'select' | 'upload' | 'skip';
+  action: 'fill' | 'select' | 'upload' | 'check' | 'skip';
   /** Text to type, option to select, or (for upload) the DOCUMENT_CATALOG key. */
   value?: string;
   reason?: string;

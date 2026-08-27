@@ -25,8 +25,8 @@ export class CoverLetterService {
     private readonly config: ConfigService,
   ) {
     const base = this.config.get<string>('APPLY_DIR') ?? './applications';
+    // Created lazily only when a JD actually requires a cover letter.
     this.outDir = join(base, 'cover-letters');
-    if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
   }
 
   /** True if the listing's description requests a cover letter. */
@@ -36,6 +36,7 @@ export class CoverLetterService {
 
   async generate(listing: JobListing): Promise<{ path: string }> {
     const body = await this.body(listing);
+    if (!existsSync(this.outDir)) mkdirSync(this.outDir, { recursive: true });
     const path = join(this.outDir, `CoverLetter_${this.slug(listing)}.pdf`);
     await this.render(path, listing, body);
     this.logger.log(`Generated cover letter for "${listing.title}" @ ${listing.company}`);
