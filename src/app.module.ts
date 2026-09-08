@@ -11,7 +11,6 @@ import { DatabaseModule } from './database/database.module';
 import { DiscoveryModule } from './discovery/discovery.module';
 import { GmailModule } from './gmail/gmail.module';
 import { JobRunsModule } from './job-runs/job-runs.module';
-import { JobsModule } from './jobs/jobs.module';
 import { OutreachModule } from './outreach/outreach.module';
 import { PersonalizationModule } from './personalization/personalization.module';
 import { ProfessorsModule } from './professors/professors.module';
@@ -33,7 +32,6 @@ import { QueueModule } from './queue/queue.module';
     GmailModule,
     OutreachModule,
     ApplyModule,
-    JobsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
