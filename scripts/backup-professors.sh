@@ -1,9 +1,3 @@
-#!/bin/bash
-# Cron wrapper for the professor CSV backup. Runs every Friday 4:00 PM.
-# Installed crontab line:  0 16 * * 5  /Users/muhammadumerbilal/Desktop/phd-outreach/scripts/backup-professors.sh
-#
-# All output is appended to backup.log inside the iCloud backup folder so you can
-# see what each run did even though cron has no terminal.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
