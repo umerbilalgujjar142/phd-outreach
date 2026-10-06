@@ -11,6 +11,7 @@ import { DatabaseModule } from './database/database.module';
 import { DiscoveryModule } from './discovery/discovery.module';
 import { GmailModule } from './gmail/gmail.module';
 import { JobRunsModule } from './job-runs/job-runs.module';
+import { MastersModule } from './masters/masters.module';
 import { OutreachModule } from './outreach/outreach.module';
 import { PersonalizationModule } from './personalization/personalization.module';
 import { ProfessorsModule } from './professors/professors.module';
@@ -32,6 +33,9 @@ import { QueueModule } from './queue/queue.module';
     GmailModule,
     OutreachModule,
     ApplyModule,
+    // Isolated feature — Erasmus Mundus master's scholarship tracker.
+    // Remove this one line (+ src/masters, masters_* tables, MASTERS_* env) to drop it.
+    MastersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

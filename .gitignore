@@ -4,6 +4,8 @@
 /build
 /pdf
 /applications
+# Generated Erasmus Mundus master's drafts (isolated feature, see src/masters)
+/masters
 # Persistent browser profile for assisted apply — holds login cookies/session.
 /.browser-profile
 
