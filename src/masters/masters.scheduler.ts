@@ -59,36 +59,55 @@ export class MastersScheduler implements OnModuleInit {
       this.logger.warn(`Masters deadline check failed: ${(err as Error).message}`);
       return;
     }
-    const { openingSoon, closingSoon, needsVerification } = summary;
-    if (!openingSoon.length && !closingSoon.length && !needsVerification.length) return;
+    const { openNow, openingSoon, closingSoon, needsVerification } = summary;
+    if (!openNow.length && !openingSoon.length && !closingSoon.length && !needsVerification.length) return;
+
+    // Mark any newly-open programme as `open` so its status reflects reality.
+    for (const p of openNow) {
+      if (p.status !== 'open') {
+        try {
+          await this.masters.updateProgram(p.id, { status: 'open' });
+        } catch {
+          /* non-fatal — the email still goes out */
+        }
+      }
+    }
 
     // One digest per calendar day — the hourly catch-up won't re-send.
     const dayKey = new Date().toISOString().slice(0, 10);
     if (this.lastDigestKey === dayKey) return;
 
+    // The headline: programmes OPEN RIGHT NOW, with the apply link, so Umer can
+    // click straight through and apply himself.
     const lines: string[] = [];
+    for (const p of openNow) {
+      const closes = p.closesAt ? ` (apply before ${p.closesAt}` + (p.daysUntilClose != null ? `, ${p.daysUntilClose}d left)` : ')') : '';
+      lines.push(`🚀 OPEN NOW — ${p.code}: APPLY HERE → ${p.portalUrl}${closes}`);
+    }
     for (const p of closingSoon) {
-      lines.push(`⏳ CLOSES in ${p.daysUntilClose}d — ${p.code}: deadline ${p.closesAt} (${p.portalUrl})`);
+      if (openNow.some((o) => o.id === p.id)) continue; // already shown as OPEN NOW
+      lines.push(`⏳ CLOSES in ${p.daysUntilClose}d — ${p.code}: deadline ${p.closesAt} → ${p.portalUrl}`);
     }
     for (const p of openingSoon) {
-      lines.push(`🟢 OPENS in ${p.daysUntilOpen}d — ${p.code}: opens ${p.opensAt} (${p.portalUrl})`);
+      lines.push(`🟢 OPENS in ${p.daysUntilOpen}d — ${p.code}: opens ${p.opensAt} → ${p.portalUrl}`);
     }
     for (const p of needsVerification) {
       lines.push(`❓ VERIFY dates — ${p.code}: ${p.datesSource}`);
     }
-    const body = `Erasmus Mundus master's — deadline watch (${dayKey}):\n\n${lines.join('\n')}\n`;
-    this.logger.log(`[${trigger}] ${lines.length} deadline item(s):\n${body}`);
+    const body =
+      `Erasmus Mundus master's — status (${dayKey}):\n\n${lines.join('\n')}\n\n` +
+      `You apply yourself — just click the link(s) above.\n`;
+    this.logger.log(`[${trigger}] ${lines.length} item(s):\n${body}`);
 
     if (this.emailEnabled && this.notifyTo && this.gmail.isConnected()) {
       try {
-        await this.gmail.send({
-          to: this.notifyTo,
-          subject: `Erasmus Mundus deadlines — ${closingSoon.length} closing, ${openingSoon.length} opening`,
-          text: body,
-        });
-        this.logger.log(`Deadline digest emailed to ${this.notifyTo}`);
+        const subject = openNow.length
+          ? `🚀 Erasmus Mundus OPEN NOW: ${openNow.map((p) => p.code).join(', ')} — apply`
+          : `Erasmus Mundus deadlines — ${closingSoon.length} closing, ${openingSoon.length} opening`;
+        await this.gmail.send({ to: this.notifyTo, subject, text: body });
+        this.logger.log(`Status email sent to ${this.notifyTo}`);
       } catch (err) {
-        this.logger.warn(`Deadline digest email failed: ${(err as Error).message}`);
+        this.logger.warn(`Status email failed: ${(err as Error).message}`);
       }
     }
     this.lastDigestKey = dayKey;

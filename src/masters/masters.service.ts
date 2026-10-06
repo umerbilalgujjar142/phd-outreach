@@ -164,24 +164,34 @@ export class MastersService {
   }
 
   /**
-   * Programmes with an imminent open or close within `windowDays`, plus any
-   * whose dates are still unverified (so we're nudged to go confirm them).
+   * What to tell Umer about. The headline bucket is `openNow` — a programme
+   * whose window is currently open (today is on/after opensAt and on/before
+   * closesAt): that's his cue to click the portal link and apply. Plus
+   * opening-soon / closing-soon within `windowDays`, and any with unverified
+   * dates (so we're nudged to go confirm them).
    */
   async upcoming(windowDays = 30): Promise<{
+    openNow: ProgramWithTiming[];
     openingSoon: ProgramWithTiming[];
     closingSoon: ProgramWithTiming[];
     needsVerification: MastersProgram[];
   }> {
     const all = await this.findAll();
     const active = all.filter((p) => !['submitted', 'accepted', 'rejected', 'withdrawn'].includes(p.status));
+    const openNow = active.filter(
+      (p) =>
+        p.daysUntilOpen != null &&
+        p.daysUntilOpen <= 0 && // on or past the open date
+        (p.daysUntilClose == null || p.daysUntilClose >= 0), // not yet closed
+    );
     const openingSoon = active.filter(
-      (p) => p.daysUntilOpen != null && p.daysUntilOpen >= 0 && p.daysUntilOpen <= windowDays,
+      (p) => p.daysUntilOpen != null && p.daysUntilOpen > 0 && p.daysUntilOpen <= windowDays,
     );
     const closingSoon = active.filter(
       (p) => p.daysUntilClose != null && p.daysUntilClose >= 0 && p.daysUntilClose <= windowDays,
     );
     const needsVerification = active.filter((p) => !p.datesVerified);
-    return { openingSoon, closingSoon, needsVerification };
+    return { openNow, openingSoon, closingSoon, needsVerification };
   }
 
   private withTiming(row: MastersProgram): ProgramWithTiming {
